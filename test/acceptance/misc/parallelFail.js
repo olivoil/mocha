@@ -4,7 +4,7 @@ describe('parallel failing', function () {
   var runs = 0;
 
   after(function (done) {
-    runs.should.eql(4);
+    runs.should.eql(5);
     done();
   })
 
@@ -55,6 +55,31 @@ describe('parallel failing', function () {
       setTimeout(function () {
         done(new Error('this is ok (3-2)'));
       }, 10)
+    });
+  })
+
+  describe('suite 4 (failing hook)', function () {
+
+    before(function (done) {
+      throw new Error('this is ok (4-before)');
+    })
+
+    after(function (done) {
+      //this should be called
+      runs++;
+      done();
+    })
+
+    it('test 4-1 (should not get here)', function (done) {
+      setTimeout(done, 80);
+      runs++;
+    })
+
+    it('pending test');
+
+    it('should not get here (4-2)', function (done) {
+      runs++;
+      throw new Error("this should not be called")
     });
   })
 })
