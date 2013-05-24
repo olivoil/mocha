@@ -1,10 +1,10 @@
 describe('parallel failing', function () {
 
-  this.parallel(true);
+  this.parallel(10);
   var runs = 0;
 
   after(function (done) {
-    runs.should.eql(5);
+    runs.should.eql(6);
     done();
   })
 
@@ -24,6 +24,11 @@ describe('parallel failing', function () {
     it('should not run this', function (done) {
       throw new Error('we should have bailed');
     });
+
+    after(function () {
+      // after hook should still be called.
+      runs++;
+    })
   })
 
   describe('suite 2', function () {
