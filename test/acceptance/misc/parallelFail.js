@@ -4,9 +4,17 @@ describe('parallel failing', function () {
   var runs = 0;
 
   after(function (done) {
-    runs.should.eql(6);
+    runs.should.eql(7);
     done();
   })
+
+
+  it('should fail (parent suite)', function (done) {
+    setTimeout(function () {
+      runs++;
+      throw new Error('this is ok (parent)');
+    }, 10);
+  });
 
   describe('bailing suite 1', function () {
 
@@ -18,7 +26,11 @@ describe('parallel failing', function () {
     })
 
     it('should fail', function (done) {
-      throw new Error('this is ok (1-2)');
+      setTimeout(function () {
+        setTimeout(function () {
+          throw new Error('this is ok (1-2)');
+        }, 20)
+      }, 20)
     });
 
     it('should not run this', function (done) {
@@ -37,15 +49,18 @@ describe('parallel failing', function () {
       setTimeout(done, 10);
     })
 
-    it('should fail', function (done) {
-      setTimeout(function () {
-        throw new Error('this is ok (2-2)');
-      }, 10);
+    describe("sub-suite", function () {
+      it('should fail', function (done) {
+        setTimeout(function () {
+          throw new Error('this is ok (2-2)');
+        }, 10);
+      });
+
+      it('should run this if not bailing', function () {
+        runs++;
+      })
     });
 
-    it('should run this if not bailing', function () {
-      runs++;
-    })
   })
 
   describe('suite 3', function () {
