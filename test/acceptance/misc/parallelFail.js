@@ -1,3 +1,9 @@
+function fail(num) {
+  setTimeout(function () {
+    throw new Error('this is ok ' + num);
+  }, 20)
+}
+
 describe('parallel failing', function () {
 
   this.parallel(10);
@@ -12,7 +18,7 @@ describe('parallel failing', function () {
   it('should fail (parent suite)', function (done) {
     setTimeout(function () {
       runs++;
-      throw new Error('this is ok (parent)');
+      fail('(parent)');
     }, 10);
   });
 
@@ -28,8 +34,8 @@ describe('parallel failing', function () {
     it('should fail', function (done) {
       setTimeout(function () {
         setTimeout(function () {
-          throw new Error('this is ok (1-2)');
-        }, 20)
+          fail('(1-2)');
+        }, 140)
       }, 20)
     });
 
@@ -52,7 +58,7 @@ describe('parallel failing', function () {
     describe("sub-suite", function () {
       it('should fail', function (done) {
         setTimeout(function () {
-          throw new Error('this is ok (2-2)');
+          fail('(2-2)');
         }, 10);
       });
 
@@ -73,7 +79,7 @@ describe('parallel failing', function () {
 
     it('should fail by passing Error to done()', function (done) {
       setTimeout(function () {
-        done(new Error('this is ok (3-2)'));
+        fail('(3-2)');
       }, 10)
     });
   })
@@ -81,7 +87,7 @@ describe('parallel failing', function () {
   describe('suite 4 (failing hook)', function () {
 
     before(function (done) {
-      throw new Error('this is ok (4-before)');
+      fail('(4-before)');
     })
 
     after(function (done) {
