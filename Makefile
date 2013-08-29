@@ -13,6 +13,7 @@ mocha.js: $(SRC) $(SUPPORT) lib/browser/diff.js
 	@node support/compile $(SRC)
 	@cat \
 	  support/head.js \
+		node_modules/async/lib/async.js \
 	  _mocha.js \
 	  support/tail.js \
 	  support/foot.js \
