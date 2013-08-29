@@ -1,4 +1,53 @@
 ;(function(){
+
+// CommonJS require()
+
+function require(p){
+    var path = require.resolve(p)
+      , mod = require.modules[path];
+    if (!mod) throw new Error('failed to require "' + p + '"');
+    if (!mod.exports) {
+      mod.exports = {};
+      mod.call(mod.exports, mod, mod.exports, require.relative(path));
+    }
+    return mod.exports;
+  }
+
+require.modules = {};
+
+require.resolve = function (path){
+    var orig = path
+      , reg = path + '.js'
+      , index = path + '/index.js';
+    return require.modules[reg] && reg
+      || require.modules[index] && index
+      || orig;
+  };
+
+require.register = function (path, fn){
+    require.modules[path] = fn;
+  };
+
+require.relative = function (parent) {
+    return function(p){
+      if ('.' != p.charAt(0)) return require(p);
+
+      var path = parent.split('/')
+        , segs = p.split('/');
+      path.pop();
+
+      for (var i = 0; i < segs.length; i++) {
+        var seg = segs[i];
+        if ('..' == seg) path.pop();
+        else if ('.' != seg) path.push(seg);
+      }
+
+      return require(path.join('/'));
+    };
+  };
+
+
+require.register("browser/async.js", function(module, exports, require){
 /*global setImmediate: false, setTimeout: false, console: false */
 (function () {
 
@@ -955,52 +1004,7 @@
 
 }());
 
-// CommonJS require()
-
-function require(p){
-    var path = require.resolve(p)
-      , mod = require.modules[path];
-    if (!mod) throw new Error('failed to require "' + p + '"');
-    if (!mod.exports) {
-      mod.exports = {};
-      mod.call(mod.exports, mod, mod.exports, require.relative(path));
-    }
-    return mod.exports;
-  }
-
-require.modules = {};
-
-require.resolve = function (path){
-    var orig = path
-      , reg = path + '.js'
-      , index = path + '/index.js';
-    return require.modules[reg] && reg
-      || require.modules[index] && index
-      || orig;
-  };
-
-require.register = function (path, fn){
-    require.modules[path] = fn;
-  };
-
-require.relative = function (parent) {
-    return function(p){
-      if ('.' != p.charAt(0)) return require(p);
-
-      var path = parent.split('/')
-        , segs = p.split('/');
-      path.pop();
-
-      for (var i = 0; i < segs.length; i++) {
-        var seg = segs[i];
-        if ('..' == seg) path.pop();
-        else if ('.' != seg) path.push(seg);
-      }
-
-      return require(path.join('/'));
-    };
-  };
-
+}); // module: browser/async.js
 
 require.register("browser/debug.js", function(module, exports, require){
 
@@ -5087,7 +5091,7 @@ require.register("runner.js", function(module, exports, require){
  */
 
 var EventEmitter = require('browser/events').EventEmitter
-  , async = require('async')
+  , async = require('browser/async')
   , debug = require('browser/debug')('mocha:runner')
   , Test = require('./test')
   , utils = require('./utils')

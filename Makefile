@@ -9,11 +9,13 @@ all: mocha.js
 lib/browser/diff.js: node_modules/diff/diff.js
 	cp node_modules/diff/diff.js lib/browser/diff.js
 
-mocha.js: $(SRC) $(SUPPORT) lib/browser/diff.js
+lib/browser/async.js: node_modules/async/lib/async.js
+	cp node_modules/async/lib/async.js lib/browser/async.js
+
+mocha.js: $(SRC) $(SUPPORT) lib/browser/diff.js lib/browser/async.js
 	@node support/compile $(SRC)
 	@cat \
 	  support/head.js \
-		node_modules/async/lib/async.js \
 	  _mocha.js \
 	  support/tail.js \
 	  support/foot.js \

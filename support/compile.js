@@ -49,6 +49,7 @@ function parseRequires(js) {
     .replace(/require\('diff'\)/g, "require('browser/diff')")
     .replace(/require\('tty'\)/g, "require('browser/tty')")
     .replace(/require\('fs'\)/g, "require('browser/fs')")
+    .replace(/require\('async'\)/g, "require('browser/async')")
 }
 
 /**
