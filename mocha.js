@@ -1584,6 +1584,18 @@ Mocha.prototype.asyncOnly = function(){
 };
 
 /**
+ * Makes root-level suites run in parallel
+ *
+ * @return {Mocha}
+ * @api public
+ */
+
+Mocha.prototype.parallel = function(){
+  this.options.parallel = true;
+  return this;
+};
+
+/**
  * Run tests and invoke `fn()` when complete.
  *
  * @param {Function} fn
@@ -1599,6 +1611,7 @@ Mocha.prototype.run = function(fn){
   var reporter = new this._reporter(runner);
   runner.ignoreLeaks = false !== options.ignoreLeaks;
   runner.asyncOnly = options.asyncOnly;
+  runner.suite.parallel(options.parallel);
   if (options.grep) runner.grep(options.grep, options.invert);
   if (options.globals) runner.globals(options.globals);
   if (options.growl) this._growl(runner, reporter);
@@ -4119,9 +4132,11 @@ require.register("runner.js", function(module, exports, require){
  */
 
 var EventEmitter = require('browser/events').EventEmitter
+  , async = require('async')
   , debug = require('browser/debug')('mocha:runner')
   , Test = require('./test')
   , utils = require('./utils')
+  , isNode = typeof window === 'undefined'
   , filter = utils.filter
   , keys = utils.keys;
 
@@ -4136,6 +4151,21 @@ var globals = [
   'clearInterval',
   'XMLHttpRequest',
   'Date'
+];
+
+
+var _events = [
+  'start',
+  'end',
+  'suite',
+  'suite end',
+  'pending',
+  'test',
+  'test end',
+  'hook',
+  'hook end',
+  'pass',
+  'fail'
 ];
 
 /**
@@ -4153,6 +4183,7 @@ module.exports = Runner;
  *   - `end`  execution complete
  *   - `suite`  (suite) test suite execution started
  *   - `suite end`  (suite) all tests (and sub-suites) have finished
+ *   - `pending`  (test) pending test encountered
  *   - `test`  (test) test execution started
  *   - `test end`  (test) test completed
  *   - `hook`  (hook) hook execution started
@@ -4245,13 +4276,7 @@ Runner.prototype.grepTotal = function(suite) {
 Runner.prototype.globalProps = function() {
   var props = utils.keys(global);
 
-  // non-enumerables
-  for (var i = 0; i < globals.length; ++i) {
-    if (~utils.indexOf(props, globals[i])) continue;
-    props.push(globals[i]);
-  }
-
-  return props;
+  return utils.uniq(props.concat(globals));
 };
 
 /**
@@ -4263,11 +4288,11 @@ Runner.prototype.globalProps = function() {
  */
 
 Runner.prototype.globals = function(arr){
-  if (0 == arguments.length) return this._globals;
-  debug('globals %j', arr);
+  if (0 === arguments.length) return this._globals;
   utils.forEach(arr, function(arr){
     this._globals.push(arr);
   }, this);
+  this._globals = utils.uniq(this._globals);
   return this;
 };
 
@@ -4279,16 +4304,17 @@ Runner.prototype.globals = function(arr){
 
 Runner.prototype.checkGlobals = function(test){
   if (this.ignoreLeaks) return;
-  var ok = this._globals;
-  var globals = this.globalProps();
-  var isNode = process.kill;
-  var leaks;
+  test = test || this.test;
+  var ok = this._globals
+    , currGlobals = this.globalProps()
+    , isNode = process.kill
+    , leaks;
 
   // check length - 2 ('errno' and 'location' globals)
-  if (isNode && 1 == ok.length - globals.length) return
-  else if (2 == ok.length - globals.length) return;
+  if (isNode && 1 == ok.length - currGlobals.length) return;
+  else if (2 == ok.length - currGlobals.length) return;
 
-  leaks = filterLeaks(ok, globals);
+  leaks = filterLeaks(ok, currGlobals);
   this._globals = this._globals.concat(leaks);
 
   if (leaks.length > 1) {
@@ -4320,10 +4346,9 @@ Runner.prototype.fail = function(test, err){
 /**
  * Fail the given `hook` with `err`.
  *
- * Hook failures (currently) hard-end due
+ * Hook failures make the suite bail due
  * to that fact that a failing hook will
- * surely cause subsequent tests to fail,
- * causing jumbled reporting.
+ * surely cause subsequent tests to fail.
  *
  * @param {Hook} hook
  * @param {Error} err
@@ -4331,8 +4356,8 @@ Runner.prototype.fail = function(test, err){
  */
 
 Runner.prototype.failHook = function(hook, err){
+  this.suite.bail(true);
   this.fail(hook, err);
-  this.emit('end');
 };
 
 /**
@@ -4349,10 +4374,13 @@ Runner.prototype.hook = function(name, fn){
     , self = this
     , timer;
 
+  // if we're bailing, only run hooks if this suite caused it, otherwise, skip
+  if (suite.failures && suite.bail() && !suite.failSource &&
+    name.indexOf('after') !== 0) return fn();
+
   function next(i) {
     var hook = hooks[i];
     if (!hook) return fn();
-    if (self.failures && suite.bail()) return fn();
     self.currentRunnable = hook;
 
     hook.ctx.currentTest = self.test;
@@ -4363,16 +4391,23 @@ Runner.prototype.hook = function(name, fn){
       self.failHook(hook, err);
     });
 
+    // save a reference to next() in case the hook fails asyncronously
+    self.next = next.bind(null, i + 1);
+
     hook.run(function(err){
       hook.removeAllListeners('error');
       var testError = hook.error();
       if (testError) self.fail(self.test, testError);
-      if (err) return self.failHook(hook, err);
-      self.emit('hook end', hook);
-      delete hook.ctx.currentTest;
+      if (err) {
+        self.failHook(hook, err);
+      } else {
+        self.emit('hook end', hook);
+      }
       next(++i);
     });
   }
+
+
 
   Runner.immediately(function(){
     next(0);
@@ -4389,29 +4424,18 @@ Runner.prototype.hook = function(name, fn){
  * @api private
  */
 
-Runner.prototype.hooks = function(name, suites, fn){
-  var self = this
-    , orig = this.suite;
+Runner.prototype.hooks = function(name, runners, fn){
 
-  function next(suite) {
-    self.suite = suite;
+  function next(runner) {
+    if (!runner) return fn();
 
-    if (!suite) {
-      self.suite = orig;
-      return fn();
-    }
-
-    self.hook(name, function(err){
-      if (err) {
-        self.suite = orig;
-        return fn(err);
-      }
-
-      next(suites.pop());
+    runner.hook(name, function(err){
+      if (err) return fn(err);
+      next(runners.pop());
     });
   }
 
-  next(suites.pop());
+  next(runners.pop());
 };
 
 /**
@@ -4423,8 +4447,8 @@ Runner.prototype.hooks = function(name, suites, fn){
  */
 
 Runner.prototype.hookUp = function(name, fn){
-  var suites = [this.suite].concat(this.parents()).reverse();
-  this.hooks(name, suites, fn);
+  var runners = [this].concat(this.parents()).reverse();
+  this.hooks(name, runners, fn);
 };
 
 /**
@@ -4436,8 +4460,8 @@ Runner.prototype.hookUp = function(name, fn){
  */
 
 Runner.prototype.hookDown = function(name, fn){
-  var suites = [this.suite].concat(this.parents());
-  this.hooks(name, suites, fn);
+  var runners = [this].concat(this.parents());
+  this.hooks(name, runners, fn);
 };
 
 /**
@@ -4449,10 +4473,10 @@ Runner.prototype.hookDown = function(name, fn){
  */
 
 Runner.prototype.parents = function(){
-  var suite = this.suite
-    , suites = [];
-  while (suite = suite.parent) suites.push(suite);
-  return suites;
+  var runner = this
+    , runners = [];
+  while (runner = runner.parent) runners.push(runner);
+  return runners;
 };
 
 /**
@@ -4494,7 +4518,7 @@ Runner.prototype.runTests = function(suite, fn){
 
   function next(err) {
     // if we bail after first err
-    if (self.failures && suite._bail) return fn();
+    if (suite.failures && suite._bail) return fn();
 
     // next test
     test = tests.shift();
@@ -4550,32 +4574,111 @@ Runner.prototype.runTests = function(suite, fn){
 
 Runner.prototype.runSuite = function(suite, fn){
   var total = this.grepTotal(suite)
-    , self = this
-    , i = 0;
+    , self = this,
+    runners = [];
 
   debug('run suite %s', suite.fullTitle());
 
   if (!total) return fn();
 
-  this.emit('suite', this.suite = suite);
+  this.emit('suite', suite);
 
-  function next() {
-    var curr = suite.suites[i++];
-    if (!curr) return done();
-    self.runSuite(curr, next);
+  function suiteItr(suite, cb) {
+    var runner = self.createRunner(suite);
+    runners.push(runner);
+    runner.run(function (failures) {
+      self.failures += failures;
+      cb(null);
+    });
   }
 
+
   function done() {
-    self.suite = suite;
+    debug('suite done %s', suite.fullTitle());
+
+    //self.listenUncaught();
+
+    if(suite.fullTitle() === "parallel failing") {
+      debugger;
+    }
+
     self.hook('afterAll', function(){
+      debug('suite end %s', suite.fullTitle());
+      if (suite.parallel()) {
+        self._rebroadcastAll(runners);
+      }
       self.emit('suite end', suite);
       fn();
     });
   }
 
+  function next() {
+    self.currentRunnable = null;
+
+    //self.unlistenUncaught();
+
+    var parallelism = suite.parallel();
+    if (suite.parallel() && isNode) { // cant run in parallel in the browser
+      if (parallelism === true) { parallelism = 10; }
+      async.eachLimit(suite.suites, parallelism, suiteItr, done);
+    } else {
+      async.eachSeries(suite.suites, suiteItr, done);
+    }
+  }
+
+  this.on('fail', function(){
+    suite.failSource = true;
+    suite.fail();
+  });
+
   this.hook('beforeAll', function(){
     self.runTests(suite, next);
   });
+
+};
+
+Runner.prototype.createRunner = function(suite) {
+  var runner = new Runner(suite);
+  runner.parent = this;
+  runner.ignoreLeaks = this.ignoreLeaks;
+  runner.asyncOnly = this.asyncOnly;
+  runner.grep(this._grep, this._invert);
+  runner.globals(this.globals());
+  this._wrapEvents(runner);
+
+  return runner;
+};
+
+/**
+ * Wrap a child runner's events and rebroadcast.  Cache them and batch
+ * rebroadcast at the end if we are running in parallel.
+ */
+Runner.prototype._wrapEvents = function(runner) {
+  var self = this;
+  runner.eventCache = [];
+  _events.forEach(function (event) {
+    runner.on(event, function (data, err) {
+      if (self.suite.parallel()) {
+        runner.eventCache.push({event: event, data: data, err: err});
+      } else {
+        self.emit(event, data, err);
+      }
+    });
+  });
+};
+
+/**
+ * Replay the cached events from child runners as if this runner emitted them
+ * @param  {Array[Runner]} runners
+ * @api private
+ */
+Runner.prototype._rebroadcastAll = function (runners) {
+  var self = this;
+  runners.forEach(function (runner) {
+    runner.eventCache.forEach(function (cache) {
+      self.emit(cache.event, cache.data, cache.err);
+    });
+  })
 };
 
 /**
@@ -4588,9 +4691,11 @@ Runner.prototype.runSuite = function(suite, fn){
 Runner.prototype.uncaught = function(err){
   debug('uncaught exception %s', err.message);
   var runnable = this.currentRunnable;
+  debugger;
   if (!runnable || 'failed' == runnable.state) return;
   runnable.clearTimeout();
   err.uncaught = true;
+  if ('hook' == runnable.type) this.suite.bail(true);
   this.fail(runnable, err);
 
   // recover from test
@@ -4600,9 +4705,44 @@ Runner.prototype.uncaught = function(err){
     return;
   }
 
-  // bail on hooks
-  this.emit('end');
+  // recover from hooks
+  this.emit('hook end', runnable);
+  this.next();
 };
+
+/**
+ * Set up uncaught error listeners
+ *
+ * @api private *
+ */
+Runner.prototype.listenUncaught = function () {
+  if (isNode) {
+    // if this suite is to be run in parallel, then we have to create a domain
+    // to sandbox errors
+    if (!this.domain) this.domain = require('domain').create();
+    this.domain.suiteName = this.suite.fullTitle();
+    this.domain.on('error', this.uncaught);
+  } else {
+    // uncaught exception, works when all suites are serial
+    process.on('uncaughtException', this.uncaught);
+  }
+}
+
+/**
+ * Tear down uncaught error listeners
+ *
+ * @api private
+ */
+
+Runner.prototype.unlistenUncaught = function () {
+  if (this.domain) {
+    //this.domain.removeListener('error', this.uncaught);
+    //this.domain.suiteName = this.suite.fullTitle() + " OFF";
+  } else {
+    process.removeListener('uncaughtException', this.uncaught);
+  }
+}
+
 
 /**
  * Run the root suite and invoke `fn(failures)`
@@ -4615,30 +4755,41 @@ Runner.prototype.uncaught = function(err){
 
 Runner.prototype.run = function(fn){
   var self = this
-    , fn = fn || function(){};
+    , domain;
+  fn = fn || function(){};
+  this.uncaught = this.uncaught.bind(this);
 
-  function uncaught(err){
-    self.uncaught(err);
+  function end() {
+    debug('end runner: %s', self.suite.title);
+    //Runner.immediately(self.unlistenUncaught.bind(self));
+    fn(self.failures);
   }
 
-  debug('start');
+  function start() {
+    debug('start');
 
-  // callback
-  this.on('end', function(){
-    debug('end');
-    process.removeListener('uncaughtException', uncaught);
-    fn(self.failures);
-  });
+    // callback
+    self.on('end', end);
 
-  // run suites
-  this.emit('start');
-  this.runSuite(this.suite, function(){
-    debug('finished running');
-    self.emit('end');
-  });
+    // run suites
+    if (!self.suite.parent) self.emit('start');
+    self.runSuite(self.suite, function(){
+      debug('finished running');
+      if (!self.suite.parent)
+        self.emit('end');
+      else {
+        end();
+      }
+    });
+  }
 
-  // uncaught exception
-  process.on('uncaughtException', uncaught);
+  this.listenUncaught();
+
+  if(this.domain) {
+    this.domain.run(start);
+  } else {
+    start();
+  }
 
   return this;
 };
@@ -4657,12 +4808,12 @@ function filterLeaks(ok, globals) {
     // Firefox and Chrome exposes iframes as index inside the window object
     if (/^d+/.test(key)) return false;
     var matched = filter(ok, function(ok){
-      if (~ok.indexOf('*')) return 0 == key.indexOf(ok.split('*')[0]);
+      if (~ok.indexOf('*')) return !key.indexOf(ok.split('*')[0]);
       // Opera and IE expose global variables for HTML element IDs (issue #243)
       if (/^mocha-/.test(key)) return true;
       return key == ok;
     });
-    return matched.length == 0 && (!global.navigator || 'onerror' !== key);
+    return !matched.length && (!global.navigator || 'onerror' !== key);
   });
 }
 
@@ -4723,6 +4874,7 @@ function Suite(title, ctx) {
   this.suites = [];
   this.tests = [];
   this.pending = false;
+  this.failures = false;
   this._beforeEach = [];
   this._beforeAll = [];
   this._afterEach = [];
@@ -4795,7 +4947,7 @@ Suite.prototype.slow = function(ms){
 /**
  * Sets whether to bail after first error.
  *
- * @parma {Boolean} bail
+ * @param {Boolean} bail
  * @return {Suite|Number} for chaining
  * @api private
  */
@@ -4806,6 +4958,40 @@ Suite.prototype.bail = function(bail){
   this._bail = bail;
   return this;
 };
+
+/**
+ * Sets whether to run child suites in parallel
+ *
+ * @param {Boolean} parallel
+ * @return {Suite|Number} for chaining
+ * @api private
+ */
+
+Suite.prototype.parallel = function(parallel){
+  if (0 == arguments.length) return this._parallel;
+  debug('parallel %s', parallel);
+  this._parallel = parallel;
+  return this;
+};
+
+/**
+ * Mark this suite as having failures, as well as  any child suites.
+ * This is bookkeeping for fine-grained bailing.
+ *
+ * @return {Suite|Number} for chaining
+ * @api private
+ */
+
+Suite.prototype.fail = function(){
+  if (this.bail()) {
+    debug('setting suite failure');
+    this.failures = true;
+    utils.forEach(this.suites, function(suite) {
+      suite.fail();
+    });
+  }
+  return this;
+}
 
 /**
  * Run `fn(test[, done])` before running tests.
@@ -5013,7 +5199,6 @@ Test.prototype.constructor = Test;
 }); // module: test.js
 
 require.register("utils.js", function(module, exports, require){
-
 /**
  * Module dependencies.
  */
@@ -5028,6 +5213,7 @@ var fs = require('browser/fs')
  */
 
 var ignore = ['node_modules', '.git'];
+var nextTick = global.setImmediate || process.nextTick;
 
 /**
  * Escape special characters in the given string of html.
@@ -5115,6 +5301,21 @@ exports.filter = function(arr, fn){
 };
 
 /**
+ * uniq -- takes an array of strings and removes duplicated elements
+ * @param  {Array} arr
+ * @return {Array}
+ */
+exports.uniq = function(arr) {
+  var cache = {}
+    , ret = [];
+  exports.forEach(arr, function (val) {
+    if (!cache[val]) ret.push(val);
+    cache[val] = true;
+  });
+  return ret;
+};
+
+/**
  * Object.keys (<=IE8)
  *
  * @param {Object} obj
@@ -5124,7 +5325,7 @@ exports.filter = function(arr, fn){
 
 exports.keys = Object.keys || function(obj) {
   var keys = []
-    , has = Object.prototype.hasOwnProperty // for `window` on <=IE8
+    , has = Object.prototype.hasOwnProperty; // for `window` on <=IE8
 
   for (var key in obj) {
     if (has.call(obj, key)) {
@@ -5134,6 +5335,60 @@ exports.keys = Object.keys || function(obj) {
 
   return keys;
 };
+
+/**
+ * Run an async function on an array of items, callback when done.
+ * Similar to async.eachSeries
+ * @param  {Array}      arr      Array of items
+ * @param  {Function}   iterator Async Function
+ * @param  {Function}   callback
+ */
+
+exports.eachSeries = function(arr, iterator, callback) {
+  var self = this
+    , i = 0;
+
+  function next() {
+    if (i === arr.length) {
+      return callback();
+    }
+
+    var item = arr[i++];
+
+    iterator.call(self, item, function () {
+      nextTick(next);
+    });
+  }
+
+  next();
+};
+
+
+/**
+ * Run an async function on an array of items in parallel.  Callback when all
+ * are done.  Similar to async.eachParallel
+ * @param  {Array}      arr      The array of items
+ * @param  {Function}   iterator Async iterator
+ * @param  {Function}   callback
+ */
+
+exports.eachParallel = function(arr, iterator, callback) {
+  var self = this
+    , completed = 0;
+
+  function done(err) {
+    completed++;
+    if (completed === arr.length) callback();
+  }
+
+  if (arr.length === 0) return callback();
+
+  //kick off the
+  exports.forEach(arr, function (item) {
+    iterator.call(self, item, done);
+  });
+
+}
 
 /**
  * Watch the given `files` for changes
@@ -5178,7 +5433,7 @@ exports.files = function(dir, ret){
     path = join(dir, path);
     if (fs.statSync(path).isDirectory()) {
       exports.files(path, ret);
-    } else if (path.match(/\.(js|coffee)$/)) {
+    } else if (path.match(/\.(js|coffee|litcoffee|coffee.md)$/)) {
       ret.push(path);
     }
   });
